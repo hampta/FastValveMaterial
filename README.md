@@ -9,8 +9,8 @@ The releases might be outdated, they are simply the latest commit at that time, 
 - VTFLibWrapper (https://github.com/Ganonmaster/VTFLibWrapper)
 # Setup:
 - If you're using the release version, you don't need to do anything else
-- On the other hand, when cloning the source, make sure to also pull and initialize VTFLibWrapper ("git submodules init" + "git submodules update")
-
+- On the other hand, when cloning the source, make sure to also pull and initialize VTFLibWrapper ("`git submodules init`" + "`git submodules update`")
+- `pip install -r requirements.txt`
 - You will need the following textures:
     - Diffuse/Color map
     - Normal map
@@ -20,7 +20,18 @@ The releases might be outdated, they are simply the latest commit at that time, 
 
 1. Adjust config.md
 2. Drop all texture files into your input folder
-3. Run FastValveMaterial.py
+3. Run `FastValveMaterial.py`
+
+## CMD
+```
+git clone https://github.com/hampta/FastValveMaterial
+cd FastValveMaterial
+git submodules init
+git submodules update
+pip install -r requirements.txt
+python FastValveMaterial.py
+```
+
 # Notes and Troubleshooting:
 - Make sure your images are in RGBA8888 format. While the script can understand many different color formats, if you're getting errors, check if this is the case.
 - The config file needs to stay stay 34 lines long, since FVM is just parsing the parameters from every line. For example, if you want to ignore an image, simply clear the line and do not delete it!!
