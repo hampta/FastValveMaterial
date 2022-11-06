@@ -39,3 +39,10 @@ python FastValveMaterial.py
 # Examples:
 - With FVM: ![1](https://user-images.githubusercontent.com/35012873/162594134-72cd6f11-e309-4090-a5e3-12a7582e2d9a.png)
 - Witout FVM: ![2](https://user-images.githubusercontent.com/35012873/162594203-b2ca89f8-4806-4ac1-b5cd-b733b4d54ab6.png)
+
+# TODO
+- binary (.exe) build for windows
+- rewrite textures finder
+- move .vmt templates to separate files
+- rewrite main function
+- multithreading support
