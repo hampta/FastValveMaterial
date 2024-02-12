@@ -1,13 +1,20 @@
-[![Releases](https://img.shields.io/github/downloads/marv7000/FastValveMaterial/total.svg)](https://github.com/marv7000/FastValveMaterial/releases) [![License](https://img.shields.io/github/license/marv7000/FastValveMaterial.svg)](https://github.com/marv7000/Tyrant/blob/master/LICENSE)
+[![Releases](https://img.shields.io/github/downloads/hampta/FastValveMaterial/total.svg)](https://github.com/hampta/FastValveMaterial/releases) 
+[![License](https://img.shields.io/github/license/hampta/FastValveMaterial.svg)](https://github.com/hampta/Tyrant/blob/master/LICENSE)
+
 # FastValveMaterial
 Convert PBR materials to VMT and VTF files that imitate PBR properties in Source engine games like Garry's Mod.
-# Warning
-The releases might be outdated, they are simply the latest commit at that time, packed together with VTFLibWrapper.
+
 # Dependencies:
 - pillow (PIL)
-- numpy
 - VTFLibWrapper (https://github.com/Ganonmaster/VTFLibWrapper)
-# Setup:
+
+# Usage:
+- Download the latest release from the [Releases](https://github.com/hampta/FastValveMaterial/releases) tab
+- Extract to a folder
+- Change the settings in `config.ini``
+- Run `FastValveMaterial.exe`
+
+# Usage from source (or linux):
 - If you're using the release version, you don't need to do anything else
 - On the other hand, when cloning the source, make sure to also pull and initialize VTFLibWrapper ("`git submodules init`" + "`git submodules update`")
 - `pip install -r requirements.txt`
@@ -18,7 +25,7 @@ The releases might be outdated, they are simply the latest commit at that time, 
     - Glossiness map (If you have a roughness map, set "Material Type" in config.md to "rough")
     - Optional: Ambient Occlusion map (If no image is given, the script defaults to a white image as the AO map)
 
-1. Adjust config.md
+1. Adjust config.ini
 2. Drop all texture files into your input folder
 3. Run `FastValveMaterial.py`
 
@@ -40,8 +47,7 @@ python FastValveMaterial.py
 - Witout FVM: ![2](https://user-images.githubusercontent.com/35012873/162594203-b2ca89f8-4806-4ac1-b5cd-b733b4d54ab6.png)
 
 # TODO
-- binary (.exe) build for windows
+- ~~binary (.exe) build for windows~~
 - rewrite textures finder
-- move .vmt templates to separate files
 - rewrite main function
 - multithreading support
