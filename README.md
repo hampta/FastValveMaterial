@@ -11,7 +11,7 @@ Convert PBR materials to VMT and VTF files that imitate PBR properties in Source
 # Usage:
 - Download the latest release from the [Releases](https://github.com/hampta/FastValveMaterial/releases) tab
 - Extract to a folder
-- Change the settings in `config.ini``
+- Change the settings in `config.ini`
 - Run `FastValveMaterial.exe`
 
 # Use arguments:
@@ -32,7 +32,7 @@ Convert PBR materials to VMT and VTF files that imitate PBR properties in Source
     - Diffuse/Color map
     - Normal map
     - Metalness map
-    - Glossiness map (If you have a roughness map, set "Material Type" in config.md to "rough")
+    - Glossiness map (If you have a roughness map, set "Material Type" in `config.ini` to "rough")
     - Optional: Ambient Occlusion map (If no image is given, the script defaults to a white image as the AO map)
 
 1. Adjust config.ini
