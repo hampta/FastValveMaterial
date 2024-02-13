@@ -58,7 +58,8 @@ python FastValveMaterial.py
 - Witout FVM: ![2](https://user-images.githubusercontent.com/35012873/162594203-b2ca89f8-4806-4ac1-b5cd-b733b4d54ab6.png)
 
 # TODO
+- texture maps presets in `config.ini` (your metallic is in the alpha channel of the normal map, and roughness is in the alpha channel of the diffuse or any other “format”. So that you can make a preset for certain formats and use them without separating them in a photo editor)
 - ~~binary (.exe) build for windows~~
-- rewrite textures finder
-- rewrite main function
-- multithreading support
+- ~~rewrite textures finder~~
+- ~~rewrite main function~~
+- ~~multithreading support~~
