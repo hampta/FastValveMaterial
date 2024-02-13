@@ -1,4 +1,5 @@
 [![Releases](https://img.shields.io/github/downloads/hampta/FastValveMaterial/total.svg)](https://github.com/hampta/FastValveMaterial/releases) 
+[![wakatime](https://wakatime.com/badge/user/018ccf89-9b87-4916-8fba-bce250de562d/project/018d95d6-9e3b-45d9-a2b2-1ebed8471d4d.svg)](https://wakatime.com/badge/user/018ccf89-9b87-4916-8fba-bce250de562d/project/018d95d6-9e3b-45d9-a2b2-1ebed8471d4d)
 [![License](https://img.shields.io/github/license/hampta/FastValveMaterial.svg)](https://github.com/hampta/Tyrant/blob/master/LICENSE)
 
 # FastValveMaterial
