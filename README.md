@@ -14,6 +14,16 @@ Convert PBR materials to VMT and VTF files that imitate PBR properties in Source
 - Change the settings in `config.ini``
 - Run `FastValveMaterial.exe`
 
+# Use arguments:
+- `-c` or `--config` - Config file to use
+- `-i` or `--input` - Input folder to use
+- `-o` or `--output` - Output folder to use
+- `-t` or `--threads` - Thread count to use
+- `-d` or `--debug` - Enable debug messages
+- `-f` or `--fast-export` - Enable fast export (no compression)
+- `-e` or `--export` - Export images
+- `-h` or `--help` - Show help message
+
 # Usage from source (or linux):
 - If you're using the release version, you don't need to do anything else
 - On the other hand, when cloning the source, make sure to also pull and initialize VTFLibWrapper ("`git submodules init`" + "`git submodules update`")

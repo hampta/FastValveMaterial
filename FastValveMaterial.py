@@ -29,10 +29,17 @@ SOFTWARE. """
 import configparser
 
 import os
+import sys
+import glob
 import shutil
 import sys
 import logging
+import json
+import argparse
+import multiprocessing
+from urllib.request import urlopen
 from ctypes import create_string_buffer
+from dataclasses import dataclass
 from pathlib import Path
 from enum import Enum
 
@@ -42,8 +49,7 @@ import VTFLibWrapper.VTFLib as VTFLib
 import VTFLibWrapper.VTFLibEnums as VTFLibEnums
 
 vtf_lib = VTFLib.VTFLib()
-version = "240212"
-
+version = "240213"
 
 class TextureType(Enum):
     DIFFUSE = 'c'
@@ -101,9 +107,9 @@ PROXIES_TEMPLATE = """\
     }"""
 
 class Config:
-    def __init__(self) -> None:
+    def __init__(self, file="config.ini"):
         __config = configparser.ConfigParser()
-        __config.read("config.ini")
+        __config.read(file)
         # Input
         self.input_format = __config["Input"]["Format"]
         self.input_scale = __config["Input"].getfloat("Scale")
@@ -119,6 +125,7 @@ class Config:
         self.export_images = __config["Output"].getboolean("ExportImages")
         self.material_setup = __config["Output"]["MaterialSetup"]
         # Debug
+        self.thread_count = __config["Debug"].getint("ThreadCount")
         self.debug_messages = __config["Debug"].getboolean("DebugMessages")
         self.info_config = __config["Debug"].getboolean("PrintConfig")
         self.force_compression = __config["Debug"].getboolean("ForceCompression")
@@ -128,370 +135,361 @@ class Config:
         self.material_proxies = __config["Debug"].getboolean("MaterialProxies")
         self.orm = __config["Debug"].getboolean("ORM")
         self.phongwarps = __config["Debug"].getboolean("Phongwarps")
+        if self.thread_count == -1:
+            self.thread_count = os.cpu_count()
+            
+            
+@dataclass
+class Material:
+    name: str
+    color_path: str
+    ao_path: str = None
+    normal_path: str = None
+    metallic_path: str = None
+    roughness_path: str = None
+    
+    def list(self):
+        return [self.color_path, self.ao_path, self.normal_path, self.metallic_path, self.roughness_path]
 
 
-config = Config()
+def check_new_version():
+    # Check for new version from GitHub releases
+    try:
+        response = urlopen("https://api.github.com/repos/hampta/FastValveMaterial/releases/latest")
+        data = response.read()
+        data = json.loads(data)
+        vers = data.get("tag_name")
+        if version != vers:
+            logging.info(f"╔═════════════════════════════════════════════════════════════════════════════╗\n")
+            logging.info(f"║ New version available: v{vers}                                              ║\n")
+            logging.info(f"║ Download it at: https://github.com/hampta/FastValveMaterial/releases/latest ║\n")
+            logging.info(f"╚═════════════════════════════════════════════════════════════════════════════╝\n")
+    except Exception as e:
+        logging.info(f"Could not check for new version: {e}\n")
+ 
+
+all_processes = []
 
 handler = logging.StreamHandler(sys.stdout)
 handler.terminator = "\r"
 
-logging.basicConfig(level=logging.info if config.debug_messages else logging.INFO,
-                    format='[FVM] [%(levelname)s] %(message)s', handlers=[handler])
-logging.info(f"FastValveMaterial (v{version}" + ")\n")
-
-
-# Check if a file in "path" starts with the desired "name" and ends with "ending"
-def check_for_valid_files(path: str, name: str, ending: str):
-    for file in os.listdir(path):
-        # ? Works in theory, but is busted if materials start with the same prefix
-        if file.endswith(ending) and file.startswith(name + ending):
-            return file
-
+# /////////////////////
+# Logging setup
+# /////////////////////
+logging.basicConfig(format='[FVM] [%(levelname)s] %(message)s', level=logging.INFO, handlers=[handler])
 
 def replace_list(string, list):
     for i in list:
         string = string.replace(i, "")
     return string
 
-
-def find_material_names():  # Uses the color map to determine the current material name
-    list_stuff = []
-    for file in os.listdir(config.input_path):
-        # If file ends with "scheme.format
-        if file.endswith(config.input_format):
-            # Get rid of "scheme.format" to get the material name and append it to the list of all materials
-            material_name = replace_list(file, [f".{config.input_format}",
-                                                config.input_color, config.input_ao,
-                                                config.input_normal, config.input_metallic,
-                                                config.input_roughness])
-            list_stuff.append(material_name)
-    return list(set(list_stuff))
-
-
-def do_diffuse(color_image: Image.Image, ao_image: Image.Image,
-               metallic_image: Image.Image, glossiness_image: Image.Image, material_name: str):  # Generate Diffuse/Color map
-    final_diffuse = color_image.convert("RGBA")
-    if ao_image is None:
-        final_diffuse = ImageChops.blend(final_diffuse.convert("RGB"),
-                                         ImageChops.multiply(final_diffuse.convert("RGB"), 
-                                                             glossiness_image.convert("RGB")), 0.3).convert("RGBA")  # Combine diffuse and glossiness map
-    else:
-        final_diffuse = ImageChops.multiply(final_diffuse.convert("RGB"),
-                                            ao_image.convert("RGB")).convert("RGBA")  # Combine diffuse and occlusion map
-    # Split diffuse image into channels to modify alpha
-    r, g, b, a = final_diffuse.split()
-    # * I think i forgot to remove some excess conversion but i literally cannot be asked to do so
-    # Blend the alpha channel with metal_image
-    a = Image.blend(a.convert("L"), metallic_image.convert("L"),
-                    config.metallic_factor / 255 * 0.83).convert("L")
-    color_spc = (r, g, b, a)
-    # Merge all channels together
-    final_diffuse = Image.merge("RGBA", color_spc)
-    logging.info("Exporting Diffuse...\n")
-    export_texture(final_diffuse, material_name, TextureType.DIFFUSE, 'DXT5')
-
-
-def do_exponent(glossiness_image: Image.Image, material_name: str):  # Generate the exponent map
-    final_exponent = glossiness_image.convert("RGBA")
-    r, g, b, a = final_exponent.split()
-    layerImage = Image.new('RGBA',
-                           [final_exponent.size[0], final_exponent.size[1]],
-                           (0, 217, 0, 100))
-    blackImage = Image.new('RGBA',
-                           [final_exponent.size[0], final_exponent.size[1]],
-                           (0, 0, 0, 100))
-    final_exponent = Image.blend(final_exponent, layerImage, 0.5)
-    g = g.convert('RGBA')
-    b = b.convert('RGBA')
-    g = Image.blend(g, layerImage, 1).convert('L')
-    b = Image.blend(b, blackImage, 1).convert('L')
-    if config.clear_exponent:
-        g = Image.new('L', [final_exponent.size[0], final_exponent.size[1]], 255)
-    colorSpc = (r, g, b, a)
-    final_exponent = Image.merge('RGBA', colorSpc)
-    logging.info("Exporting Exponent...\n")
-    export_texture(final_exponent, material_name,
-                   TextureType.EXPONENT, 'DXT5' if config.force_compression else 'DXT1')
-
-
-def do_normal(normalmap_image: Image.Image, glossiness_image: Image.Image, material_name: str):  # Generate the normal map
-    final_normal = normalmap_image.convert('RGBA')
-    final_gloss = glossiness_image.convert('RGBA')
-    final_gloss = do_gamma(final_gloss, config.midtone)
-    r, g, b, a = final_normal.split()
-    a = Image.blend(a, final_gloss.convert('L'), 1).convert('L')
-    colorSpc = (r, g, b, a)
-    final_normal = Image.merge('RGBA', colorSpc)
-    logging.info("Exporting Normal Map...\n")
-    export_texture(final_normal, material_name,
-                   TextureType.NORMAL, 'DXT5' if config.force_compression else 'RGBA8888')
-
-
-def do_gamma(image: Image.Image, gamma: float):
-    gamma = 1
-    midToneNormal = gamma / 255
-    if gamma < 128:
-        midToneNormal = midToneNormal * 2
-        gamma = 1 + (9 * (1 - midToneNormal))
-        gamma = min(gamma, 9.99)
-    elif gamma > 128:
-        midToneNormal = (midToneNormal * 2) - 1
-        gamma = 1 - midToneNormal
-        gamma = max(gamma, 0.01)
-    gamma_correction = 1 / gamma
-    if gamma != 128:
-        return image.point(lambda x: ((x/255)**gamma_correction)*255)
-    return image
-
-
-# Resize the target image to be the same as image (needed for normal maps)
-def fix_scale_mismatch(image: Image.Image, target: Image.Image):
-    factor = image.height / target.height
-    return ImageOps.scale(target, factor)
-
-
-def do_material(material_name: str):  # Create a material with the given image names
-    logging.debug(f"Creating material '{material_name}'\n")
-    if "materials" in config.output_path.parts:
-        texture_local_path = "/".join(config.output_path.parts[config.output_path.parts.index("materials") + 1:])
-    else:
-        texture_local_path = config.output_path
-    writer = VMT_TEMPLATE.format(
-        version=version, config=config,
-        output_path=texture_local_path,
-        material_name=material_name,
-        metallic_factor=config.metallic_factor,
-        midtone=config.midtone, 
-        phong=f'"$phongwarptexture" "{texture_local_path}/phongwarp_steel"' if config.phongwarps else '"$PhongFresnelRanges" "[ 4 3 10 ]"',
-        proxies=PROXIES_TEMPLATE if config.material_proxies else "")
-    try:
-        Path(config.output_path).mkdir(parents=True, exist_ok=True)
-        with open(f"{material_name}.vmt", 'w') as f:
-            f.writelines(writer)
-        shutil.move(f'{material_name}.vmt', config.output_path)
-        shutil.copy("phongwarp_steel.vtf", config.output_path)
-        # ? Spaces are needed in order to overwrite the progress count, otherwise about 4 chars will stay on screen (?????)
-        logging.debug("Material exported\n")
-    except Exception as e:
-        logging.debug("Material already exists, replacing!\n")
-        shutil.copy("phongwarp_steel.vtf", config.output_path)
-        shutil.copyfile(os.path.join(os.getcwd(), f"{material_name}.vmt"),
-                        os.path.join(os.getcwd(), config.output_path, f"{material_name}.vmt"), follow_symlinks=True)
-        os.remove(os.path.join(os.getcwd(), f"{material_name}.vmt"))
-
-
-def do_nrm_material(material_name: str):
-    logging.info(f"Creating NRM material '{material_name}' \n")
-    if "materials" in config.output_path.parts:
-        texture_local_path = "/".join(config.output_path.parts[config.output_path.parts.index("materials") + 1:])
-    else:
-        texture_local_path = config.output_path
-    writer = VMT_NORMAL_TEMPLATE.format(
-        version=version, config=config,
-        output_path=texture_local_path,
-        material_name=material_name,
-        proxies=PROXIES_TEMPLATE if config.material_proxies else "")
-    try:
-        Path("materials/").mkdir(parents=True, exist_ok=True)
-        with open(f"{material_name}_s.vmt", 'w') as f:
-            f.writelines(writer)
-        shutil.move(f'{material_name}_s.vmt', "materials/")
-    except Exception as e:
-        logging.info("Normalized material already exists, replacing!\n")
-        shutil.copyfile(os.path.join(os.getcwd(), f"{material_name}_s.vmt"),
-                        os.path.join(os.getcwd(), config.output_path, f"{material_name}_s.vmt"), follow_symlinks=True)
-        os.remove(os.path.join(os.getcwd(), f"{material_name}_s.vmt"))
-
-
-# Exports an image to VTF using VTFLib
-def export_texture(texture: Image.Image, material_name: str, texture_type: TextureType, imageFormat=None):
-    image_name = f'{material_name}_{texture_type.value}.vtf'
-    output_path = Path(f'{config.output_path}\\{image_name}')
-    def_options = vtf_lib.create_default_params_structure()
-    if imageFormat.startswith('RGBA8888') or config.fast_export:
-        def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatRGBA8888
-        def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
-        if imageFormat == 'RGBA8888Normal':
-            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
-    elif imageFormat.startswith('DXT1'):
-        def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatDXT1
-        if imageFormat == 'DXT1Normal':
-            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
-    elif imageFormat.startswith('DXT5'):
-        def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatDXT5
-        def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
-        if imageFormat == 'DXT5Normal':
-            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
-    else:
-        def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatRGBA8888
-        def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
-
-    def_options.Resize = 1
-    w, h = texture.size
-    image_data = create_string_buffer(texture.tobytes())
-    vtf_lib.image_create_single(w, h, image_data, def_options)
-    vtf_lib.image_save(image_name)
-    vtf_lib.image_destroy()
-
-    if os.path.exists(output_path):
-        logging.debug(f"{texture_type.name} already exists, replacing!\n")
-        src = os.path.join(os.getcwd(), image_name)
-        dst = os.path.join(os.getcwd(), output_path)
-        shutil.copyfile(src, dst, follow_symlinks=True)
-        os.remove(os.path.join(os.getcwd(), image_name))
-    else:
-        Path(config.output_path).mkdir(parents=True, exist_ok=True)
-        shutil.move(image_name, os.path.join(os.getcwd(), config.output_path))
-        logging.debug(f"{texture_type.name} exported\n")
-
-    path = image_name.replace(".vtf", ".tga")
-
-    if config.export_images:
-        texture.save(f"{config.output_path}{path}", "TGA")
-        logging.debug(f"Exported {path} as TGA\n")
-
-
-# /////////////////////
-# Main loop
-# /////////////////////
-def main():
-    for material_name in find_material_names():  # For every material in the input folder
-        logging.info("Loading...\n")
-        try:
-            logging.info(f"Material:\t{material_name}\n")
-            # Set the paths to the textures based on the config file
-            if config.orm:
-                color_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_color}.{config.input_format}")}'
-                aoSt = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_roughness}.{config.input_format}")}'
-                normal_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_normal}.{config.input_format}")}'
-                metal_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_roughness}.{config.input_format}")}'
-                glossSt = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_roughness}.{config.input_format}")}'
-            else:
-                color_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_color}.{config.input_format}")}'
-                if config.input_ao != '':  # If a map is set
-                    aoSt = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_ao}.{config.input_format}")}'
-                if config.input_normal != '':
-                    normal_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_normal}.{config.input_format}")}'
-                if config.input_roughness != '':
-                    glossSt = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_roughness}.{config.input_format}")}'
-                if config.input_metallic != '':
-                    metal_textute_path = f'{config.input_path}/{check_for_valid_files(config.input_path, material_name, f"{config.input_metallic}.{config.input_format}")}'
-        except FileNotFoundError:
-            logging.info(f"[ERROR] v{version} terminated with exit code -1:\n \
-                            Couldn't locate files with correct naming scheme, throwing FileNotFoundError!\n")
-            sys.exit()
-
-        if not config.orm:
-            logging.info(f"Color:\t\t{color_textute_path}\n")
-            if config.input_ao != '':
-                logging.info(f"Occlusion:\t\t{aoSt}\n")
-            else:
-                logging.info("Occlusion:\t\t None given, ignoring!\n")
-            if config.input_normal != '':
-                logging.info(f"Normal:\t\t{normal_textute_path}\n")
-            else:
-                logging.info("Normal:\t\t None given, ignoring!\n")
-            if config.input_metallic != '':
-                logging.info(f"Metalness:\t\t{metal_textute_path}\n")
-            else:
-                logging.info("Metalness:\t\t None given, ignoring!\n")
-            if config.input_roughness != '':
-                logging.info(f"Glossiness:\t{glossSt}\n")
-            else:
-                logging.info("Glossiness:\t\tNone given, ignoring!\n\n")
-
-            color_image = Image.open(color_textute_path)
-            color_image = color_image.resize((int(color_image.width * config.input_scale),
-                                            int(color_image.height * config.input_scale)),
-                                           Image.Resampling.LANCZOS)
-
-            if config.input_ao != '':
-                ao_image = Image.open(aoSt)
-                ao_image = ao_image.resize((int(ao_image.width * config.input_scale),
-                                          int(ao_image.height * config.input_scale)),
-                                         Image.Resampling.LANCZOS)
-            else:
-                # If no AO image is given, use a white image
-                ao_image = Image.new(
-                    'RGB', (color_image.width, color_image.height), (255, 255, 255))
-
-            if config.input_normal != '':
-                normal_image = Image.open(normal_textute_path)
-                normal_image = normal_image.resize((int(normal_image.width * config.input_scale),
-                                                  int(normal_image.height * config.input_scale)),
-                                                 Image.Resampling.LANCZOS)
-            else:
-                raise FileNotFoundError()  # Couldn't find a normal map
-
-            if config.input_metallic != '':
-                metal_image = Image.open(metal_textute_path)
-                metal_image = metal_image.resize((int(metal_image.width * config.input_scale),
-                                                int(metal_image.height * config.input_scale)),
-                                               Image.Resampling.LANCZOS)
-            else:
-                # If no Metalness image is given, use a black image
-                metal_image = Image.new(
-                    'RGB', (color_image.width, color_image.height), (0, 0, 0))
-
-            if config.input_roughness != '':
-                gloss_image = Image.open(glossSt)
-                gloss_image = gloss_image.resize((int(gloss_image.width * config.input_scale),
-                                                int(gloss_image.height * config.input_scale)),
-                                               Image.Resampling.LANCZOS)
-            else:
-                # If no Gloss image is given, use a white image
-                gloss_image = Image.new(
-                    'RGB', (color_image.width, color_image.height), (255, 255, 255))
-
-            if config.material_setup == "rough":
-                gloss_image = ImageOps.invert(gloss_image.convert('RGB'))
-                
-            ao_image = fix_scale_mismatch(normal_image, ao_image)
-            metal_image = fix_scale_mismatch(normal_image, metal_image)
-            color_image = fix_scale_mismatch(normal_image, color_image)
-            gloss_image = fix_scale_mismatch(normal_image, gloss_image)
-
-            if config.input_ao != '':
-                do_diffuse(color_image, ao_image, metal_image,
-                           gloss_image, material_name)
-            else:
-                do_diffuse(color_image, None, metal_image,
-                           gloss_image, material_name)
-
+class FastValveMaterial:
+    def __init__(self, config: Config, args: argparse.Namespace):
+        self.config: Config = config
+        if self.config.debug_messages:
+            logging.getLogger().setLevel(logging.DEBUG)
+        self.all_processes: list = []
+        self.vtf_lib = VTFLib.VTFLib()
+        self.vtf_lib.create_default_params_structure()
+        if args.input:
+            config.input_path = Path(args.input)
+        if args.output:
+            config.output_path = Path(args.output)
+        if args.threads:
+            config.thread_count = int(args.threads)
+        if args.debug:
+            config.debug_messages = True
+        if args.fast_export:
+            config.fast_export = True
+        if args.export:
+            config.export_images = True
+        
+    def do_diffuse(self, color_image: Image.Image, ao_image: Image.Image,
+               metallic_image: Image.Image, glossiness_image: Image.Image, material_name: str):
+        final_diffuse = color_image.convert("RGBA")
+        if ao_image is None:
+            final_diffuse = ImageChops.blend(final_diffuse.convert("RGB"),
+                                             ImageChops.multiply(final_diffuse.convert("RGB"), 
+                                                                 glossiness_image.convert("RGB")), 0.3).convert("RGBA")
         else:
-            logging.info(f"Color:\t\t {color_textute_path}\n")
-            logging.info(f"ORM:\t\t {metal_textute_path}\n")
-            logging.info(f"Normal:\t\t{normal_textute_path}\n")
+            final_diffuse = ImageChops.multiply(final_diffuse.convert("RGB"),
+                                                ao_image.convert("RGB")).convert("RGBA")
+        r, g, b, a = final_diffuse.split()
+        a = Image.blend(a.convert("L"), metallic_image.convert("L"),
+                        self.config.metallic_factor / 255 * 0.83).convert("L")
+        color_spc = (r, g, b, a)
+        final_diffuse = Image.merge("RGBA", color_spc)
+        logging.info(f"Exporting {material_name}_c...\n")
+        self.export_texture(final_diffuse, material_name, TextureType.DIFFUSE, 'DXT5')
+        
+    def do_exponent(self, glossiness_image: Image.Image, material_name: str):
+        final_exponent = glossiness_image.convert("RGBA")
+        r, g, b, a = final_exponent.split()
+        layerImage = Image.new('RGBA',
+                               [final_exponent.size[0], final_exponent.size[1]],
+                               (0, 217, 0, 100))
+        blackImage = Image.new('RGBA',
+                               [final_exponent.size[0], final_exponent.size[1]],
+                               (0, 0, 0, 100))
+        final_exponent = Image.blend(final_exponent, layerImage, 0.5)
+        g = g.convert('RGBA')
+        b = b.convert('RGBA')
+        g = Image.blend(g, layerImage, 1).convert('L')
+        b = Image.blend(b, blackImage, 1).convert('L')
+        if self.config.clear_exponent:
+            g = Image.new('L', [final_exponent.size[0], final_exponent.size[1]], 255)
+        colorSpc = (r, g, b, a)
+        final_exponent = Image.merge('RGBA', colorSpc)
+        logging.info(f"Exporting {material_name}_m...\n")
+        self.export_texture(final_exponent, material_name,
+                            TextureType.EXPONENT, 'DXT5' if self.config.force_compression else 'DXT1')
+        
+    def do_normal(self, normalmap_image: Image.Image, glossiness_image: Image.Image, material_name: str):
+        final_normal = normalmap_image.convert('RGBA')
+        final_gloss = glossiness_image.convert('RGBA')
+        final_gloss = self.do_gamma(final_gloss, self.config.midtone)
+        r, g, b, a = final_normal.split()
+        a = Image.blend(a, final_gloss.convert('L'), 1).convert('L')
+        colorSpc = (r, g, b, a)
+        final_normal = Image.merge('RGBA', colorSpc)
+        logging.info(f"Exporting {material_name}_n...\n")
+        self.export_texture(final_normal, material_name,
+                            TextureType.NORMAL, 'DXT5' if self.config.force_compression else 'RGBA8888')
+        
+    def do_gamma(self, image: Image.Image, gamma: float):
+        gamma = 1
+        midToneNormal = gamma / 255
+        if gamma < 128:
+            midToneNormal = midToneNormal * 2
+            gamma = 1 + (9 * (1 - midToneNormal))
+            gamma = min(gamma, 9.99)
+        elif gamma > 128:
+            midToneNormal = (midToneNormal * 2) - 1
+            gamma = 1 - midToneNormal
+            gamma = max(gamma, 0.01)
+        gamma_correction = 1 / gamma
+        if gamma != 128:
+            return image.point(lambda x: ((x/255)**gamma_correction)*255)
+        return image
+    
+    def fix_scale_mismatch(self, image: Image.Image, target: Image.Image, skip_factor=False):
+        if self.config.input_scale != 1.0:
+            target = target.resize((int(target.width * self.config.input_scale),
+                                    int(target.height * self.config.input_scale)),
+                                    Image.Resampling.LANCZOS)
+        if skip_factor:
+            return target
+        factor = image.width / target.width
+        return ImageOps.scale(target, factor, Image.Resampling.LANCZOS)
+    
+    def do_material(self, material_name: str):
+        logging.debug(f"Creating material '{material_name}'\n")
+        if "materials" in self.config.output_path.parts:
+            texture_local_path = "/".join(self.config.output_path.parts[self.config.output_path.parts.index("materials") + 1:])
+        else:
+            texture_local_path = self.config.output_path
+        if self.config.clear_exponent:
+            writer = VMT_NORMAL_TEMPLATE.format(
+                version=version, config=self.config,
+                output_path=texture_local_path,
+                material_name=material_name,
+                proxies=PROXIES_TEMPLATE if self.config.material_proxies else "")
+        else:
+            writer = VMT_TEMPLATE.format(
+                version=version, config=self.config,
+                output_path=texture_local_path,
+                material_name=material_name,
+                metallic_factor=self.config.metallic_factor,
+                midtone=self.config.midtone, 
+                phong=f'"$phongwarptexture" "{texture_local_path}/phongwarp_steel"' if self.config.phongwarps else '"$PhongFresnelRanges" "[ 4 3 10 ]"',
+                proxies=PROXIES_TEMPLATE if self.config.material_proxies else "")
+        Path(self.config.output_path).mkdir(parents=True, exist_ok=True)
+        with open(os.path.join(self.config.output_path, f"{material_name}.vmt"), "w") as f:
+            f.writelines(writer)
+        if self.config.phongwarps and not self.config.clear_exponent:
+            shutil.copy(os.path.join(os.path.dirname(__file__), "phongwarp_steel.vtf"), self.config.output_path)
+        logging.debug("Material exported\n")
+        
+    def export_texture(self, texture: Image.Image, material_name: str, texture_type: TextureType, imageFormat=None):
+        image_name = f'{material_name}_{texture_type.value}.vtf'
+        output_path = Path(f'{self.config.output_path}\\{image_name}')
+        def_options = self.vtf_lib.create_default_params_structure()
+        if imageFormat.startswith('RGBA8888') or self.config.fast_export:
+            def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatRGBA8888
+            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
+            if imageFormat == 'RGBA8888Normal':
+                def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
+        elif imageFormat.startswith('DXT1'):
+            def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatDXT1
+            if imageFormat == 'DXT1Normal':
+                def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
+        elif imageFormat.startswith('DXT5'):
+            def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatDXT5
+            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
+            if imageFormat == 'DXT5Normal':
+                def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagNormal
+        else:
+            def_options.ImageFormat = VTFLibEnums.ImageFormat.ImageFormatRGBA8888
+            def_options.Flags |= VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
 
-            color_image = Image.open(color_textute_path)
-            ormImage = Image.open(metal_textute_path)
-            normal_image = Image.open(normal_textute_path)
+        def_options.Resize = 1
+        w, h = texture.size
+        image_data = create_string_buffer(texture.tobytes())
+        self.vtf_lib.image_create_single(w, h, image_data, def_options)
+        self.vtf_lib.image_save(image_name)
+        self.vtf_lib.image_destroy()
+
+        if os.path.exists(output_path):
+            logging.debug(f"{texture_type.name} already exists, replacing!\n")
+            src = os.path.join(os.getcwd(), image_name)
+            dst = os.path.join(os.getcwd(), output_path)
+            shutil.copyfile(src, dst, follow_symlinks=True)
+            os.remove(os.path.join(os.getcwd(), image_name))
+        else:
+            Path(self.config.output_path).mkdir(parents=True, exist_ok=True)
+            shutil.move(image_name, os.path.join(os.getcwd(), self.config.output_path))
+            logging.debug(f"{texture_type.name} exported\n")
+
+        path = image_name.replace(".vtf", ".tga")
+
+        if self.config.export_images:
+            texture.save(os.path.join(self.config.output_path, path))
+            logging.debug(f"Exported {path} as TGA\n")
+        
+    def convert_material(self, material: Material):
+        processes = []
+
+        if not self.config.orm:
+            logging.info(f"Color:\t\t\t{material.color_path}\n")
+            logging.info(f"Ambient Occlusion:\t\t{material.ao_path}\n")
+            logging.info(f"Normal:\t\t\t{material.normal_path}\n")
+            logging.info(f"Metallic:\t\t\t{material.metallic_path}\n")
+            logging.info(f"Roughness:\t\t\t{material.roughness_path}\n")
+
+            if self.config.input_normal != '':
+                normal_image = Image.open(material.normal_path)
+                normal_image = self.fix_scale_mismatch(normal_image, normal_image, True)
+            color_image = Image.open(material.color_path)
+            color_image = self.fix_scale_mismatch(normal_image, color_image)
+            if self.config.input_ao != '':
+                if material.ao_path is None:
+                    ao_image = Image.new('RGB', color_image.size, (255, 255, 255))
+                else:
+                    ao_image = Image.open(material.ao_path)
+                    ao_image = self.fix_scale_mismatch(normal_image, ao_image)
+            if self.config.input_metallic != '':
+                if material.metallic_path is None:
+                    metal_image = Image.new('RGB', color_image.size, (0, 0, 0))
+                else:
+                    metal_image = Image.open(material.metallic_path)
+                    metal_image = self.fix_scale_mismatch(normal_image, metal_image)
+            if self.config.input_roughness != '':
+                if material.roughness_path is None:
+                    gloss_image = Image.new('RGB', color_image.size, (255, 255, 255))
+                else:
+                    gloss_image = Image.open(material.roughness_path)
+                    gloss_image = self.fix_scale_mismatch(normal_image, gloss_image)
+                if self.config.material_setup == "rough":
+                    gloss_image = ImageOps.invert(gloss_image.convert('RGB'))
+
+            if self.config.input_ao != '':
+                processes.append(multiprocessing.Process(target=self.do_diffuse, args=(color_image, ao_image, metal_image, gloss_image, material.name,)))
+            else:
+                processes.append(multiprocessing.Process(target=self.do_diffuse, args=(color_image, None, metal_image, gloss_image, material.name,)))
+        else:
+            logging.info(f"Color:\t\t {material.color_path}\n")
+            logging.info(f"ORM:\t\t {material.ao_path}\n")
+            logging.info(f"Normal:\t\t {material.normal_path}\n")
+
+            color_image = Image.open(material.color_path)
+            ormImage = Image.open(material.ao_path)
+            normal_image = Image.open(material.normal_path)
             if ormImage.width != color_image.width or ormImage.height != color_image.height:
                 ormImage = ormImage.resize((color_image.width, color_image.height),
-                                           Image.Resampling.LANCZOS)
+                                               Image.Resampling.LANCZOS)
             try:
                 (ao_image, roughness, metal_image, _) = ormImage.split()
             except Exception:
                 logging.info(
-                    "ERROR: Could not convert color bands on ORM! (Do you have empty image channels?)\n")
+                        "ERROR: Could not convert color bands on ORM! (Do you have empty image channels?)\n")
             gloss_image = ImageOps.invert(roughness.convert('RGB'))
-            do_diffuse(color_image, ao_image, metal_image,
-                       gloss_image, material_name)
-        do_exponent(gloss_image, material_name)
-        do_normal(normal_image, gloss_image, material_name)
-            
-        if (config.clear_exponent):
-            do_nrm_material(material_name)
-        else:
-            do_material(material_name)
-        logging.info(
-            f"Conversion for material '{material_name}' finished, files saved to '{config.output_path}'\n")
-
-
+            processes.append(multiprocessing.Process(target=self.do_diffuse, args=(color_image, ao_image, metal_image, gloss_image, material.name,)))
+        processes.append(multiprocessing.Process(target=self.do_exponent, args=(gloss_image, material.name,)))
+        processes.append(multiprocessing.Process(target=self.do_normal, args=(normal_image, gloss_image, material.name,)))
+        processes.append(multiprocessing.Process(target=self.do_material, args=(material.name,)))
+        logging.info(f"Pre conversion for material '{material.name}.vmt' finished\n")
+        return processes
+    
+    def find_materials(self):  # Uses the color map to determine the current material name
+        list_stuff: list[Material] = []
+        for file in glob.glob(f"{self.config.input_path}/*{self.config.input_color}.{self.config.input_format}"):
+            if self.config.input_color in file:
+                name = file.replace(f"{self.config.input_path}\\", "")
+                name = name.replace(f"{self.config.input_color}.{self.config.input_format}", "")
+                list_stuff.append(Material(name, file))
+        # find other textures maps
+        for material in list_stuff:
+            for file in glob.glob(f"{self.config.input_path}/{material.name}*.{self.config.input_format}"):
+                if file.endswith(f"{self.config.input_ao}.{self.config.input_format}"):
+                    material.ao_path = file
+                elif file.endswith(f"{self.config.input_normal}.{self.config.input_format}"):
+                    material.normal_path = file
+                elif file.endswith(f"{self.config.input_metallic}.{self.config.input_format}"):
+                    material.metallic_path = file
+                elif file.endswith(f"{self.config.input_roughness}.{self.config.input_format}"):
+                    material.roughness_path = file
+        return list_stuff
+    
+    def convert(self):
+        for material_name in self.find_materials():  # For every material in the input folder
+            all_processes.extend(self.convert_material(material_name))
+            # MAXIMUM THREAD COUNT
+            for i in range(0, len(all_processes), config.thread_count):
+                for process in all_processes[i:i + config.thread_count]:
+                    process.start()
+                for process in all_processes[i:i + config.thread_count]:
+                    process.join()
+            logging.info(f"Conversion finished, files saved to '{config.output_path}'\n")
+        
 if __name__ == "__main__":
-    main()
-    logging.debug(
-        f"v{version} finished with exit code 0: All conversions finished.\n")
-    if (config.info_config):
+    # Nuitka fix for multiprocessing
+    multiprocessing.freeze_support()
+    # /////////////////////
+    # Argument parsing
+    # /////////////////////     
+    args = argparse.ArgumentParser(description="FastValveMaterial")
+    args.add_argument("-c", "--config", help="Config file to use", default="config.ini")
+    args.add_argument("-i", "--input", help="Input folder to use")
+    args.add_argument("-o", "--output", help="Output folder to use")
+    args.add_argument("-t", "--threads", help="Thread count to use")
+    args.add_argument("-d", "--debug", help="Enable debug messages", action="store_true")
+    args.add_argument("-f", "--fast-export", help="Enable fast export", action="store_true")
+    args.add_argument("-e", "--export", help="Export images", action="store_true")
+    args = args.parse_args()
+    config = Config(args.config)
+
+    # /////////////////////
+    # Logging
+    # /////////////////////
+    
+    logging.info(f"FastValveMaterial (v{version})\n")
+    logging.info(f"Using {config.thread_count} threads\n")
+        
+    # /////////////////////
+    # Check for new version
+    # /////////////////////
+    check_new_version()
+    
+    # /////////////////////
+    # Main loop
+    # /////////////////////
+    fast_valve_material = FastValveMaterial(config, args)
+    fast_valve_material.convert()
+    
+    # /////////////////////
+    # Finish
+    # /////////////////////
+    logging.debug(f"v{version} finished with exit code 0: All conversions finished.\n")
+    if config.info_config:
         logging.info("Config file dump:\n")
         logging.info(config)
